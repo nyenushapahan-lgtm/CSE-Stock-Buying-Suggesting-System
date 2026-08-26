@@ -1,0 +1,8 @@
+<RCC>
+  <qresource prefix="icons">
+    <file>analysis.png</file>
+    <file>dashboard.png</file>
+    <file>search.png</file>
+    <file>icon.png</file>
+  </qresource>
+</RCC>

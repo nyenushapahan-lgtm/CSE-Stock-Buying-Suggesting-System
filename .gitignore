@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments and local configuration
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Logs and local runtime output
+log/*.log
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Generated project data
+resources/cash/sector_wise_investments_cash.json

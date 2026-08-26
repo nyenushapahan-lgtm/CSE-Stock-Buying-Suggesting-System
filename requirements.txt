@@ -1,0 +1,9 @@
+PySide6
+pandas
+numpy
+matplotlib
+mplfinance
+requests
+mysql-connector-python
+python-dotenv
+openai
