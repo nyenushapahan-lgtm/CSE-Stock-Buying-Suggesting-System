@@ -49,6 +49,7 @@ class Charts:
             
             all_prices = []
             min_price, max_price = float('inf'), float('-inf')
+            min_timestamp, max_timestamp = None, None
 
             for idx, (trendData, name) in enumerate(zip(trendDataList, stockName)):
                 series = QLineSeries()
@@ -71,6 +72,10 @@ class Charts:
                     if not frame.empty:
                         frame['close_price'] = pd.to_numeric(frame['close_price'], errors='coerce')
                         frame = frame.dropna(subset=['close_price'])
+                        frame = frame.sort_values('date').drop_duplicates(
+                            subset=['date'],
+                            keep='last',
+                        )
 
                 if frame.empty:
                     chart.addSeries(series)
@@ -89,6 +94,8 @@ class Charts:
                     timestamps.append(msecs)
                     prices.append(price)
                     series.append(msecs, price)
+                    min_timestamp = msecs if min_timestamp is None else min(min_timestamp, msecs)
+                    max_timestamp = msecs if max_timestamp is None else max(max_timestamp, msecs)
 
                 series.setPointLabelsColor(QColor(colors[idx % len(colors)]))
                 
@@ -103,8 +110,22 @@ class Charts:
 
             # Setup axes
             axis_x = QDateTimeAxis()
-            axis_x.setFormat("MMM yyyy")
-            axis_x.setTitleText("Month")
+            if min_timestamp is not None and max_timestamp is not None:
+                axis_x.setFormat(
+                    "dd MMM"
+                    if max_timestamp - min_timestamp <= 90 * 24 * 60 * 60 * 1000
+                    else "MMM yyyy"
+                )
+                if min_timestamp == max_timestamp:
+                    min_timestamp -= 12 * 60 * 60 * 1000
+                    max_timestamp += 12 * 60 * 60 * 1000
+                axis_x.setRange(
+                    QDateTime.fromMSecsSinceEpoch(min_timestamp),
+                    QDateTime.fromMSecsSinceEpoch(max_timestamp),
+                )
+            else:
+                axis_x.setFormat("dd MMM")
+            axis_x.setTitleText("Trading date")
             chart.addAxis(axis_x, Qt.AlignmentFlag.AlignBottom)
 
             axis_y = QValueAxis()

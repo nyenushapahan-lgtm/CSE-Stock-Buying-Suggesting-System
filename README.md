@@ -132,11 +132,19 @@ DATABASE_URL=your_database_url
 LOG_LEVEL=INFO
 ```
 
+For Ollama cloud analysis, add `OLLAMA_API_KEY` to the root `.env` file. The desktop app sends the key from server-side Python code and does not expose it to the UI.
+
 ## Data Sources
 
 - Colombo Stock Exchange (CSE) official data
 - Historical price data and market indices
 - Company financial statements and reports
+
+### Data freshness
+
+When the desktop application starts, it repairs the historical-price and sector-mapping schema, then refreshes `resources/data/data.csv` from the CSE. While the application remains open, it checks for updates every 24 hours and retains existing historical rows. Dashboard and sector charts show the data source and latest available date; if refresh fails, they continue using available bundled or cached data.
+
+Use **Data → Import → Fetching_CSE** to fetch a date range from the CSE, or **Data → Import → Upload_CSV** to import a local CSV into the historical prices table. CSV files must include `trade_date`, `symbol`, `name`, `open`, `high`, `low`, `close`, and `volume`; `turnover` and `pct_change` are optional. CSE API column names such as `closingPrice` and `sharevolume` are normalized automatically.
 
 ## Methodology
 

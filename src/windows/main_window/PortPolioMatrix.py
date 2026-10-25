@@ -62,6 +62,10 @@ class PortPolioMatrix:
         #passing test dataset
         test_df = self.load_company_dataset(symbol=symbol)
 
+        if test_df is None or test_df.empty:
+            self.logMsg.error_message(message=f"No valid trading data found for {symbol}")
+            return
+
         chart_widget = self.charts.addCandleAndVolumeChart(test_df, symbol)
 
         if chart_widget is not None:

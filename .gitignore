@@ -24,3 +24,5 @@ log/*.log
 
 # Generated project data
 resources/cash/sector_wise_investments_cash.json
+resources/cash/sector_wise_close_prices_cash.json
+resources/cash/top_gainers_close_prices_cash.json

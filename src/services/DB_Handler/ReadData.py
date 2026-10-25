@@ -3,7 +3,6 @@ from tkinter import NO
 from typing import *
 from src.databases.query import QueryOperation
 from PySide6.QtCore import QDate
-
 class ReadOperation():
     def __init__(self):
         self.query_obj = QueryOperation()
@@ -239,7 +238,7 @@ class ReadOperation():
                     DISTINCT trade_date,
                     SUM(volume) AS volume
                 FROM historical_prices 
-                WHERE 
+                WHERE
                     symbol = %s 
                     AND 
                     trade_date = (
@@ -315,7 +314,7 @@ class ReadOperation():
                 return False, "Not enough trading dates available", {}
             
             # ✅ Get data for last 5 days in a single query
-            date_range = dates_list[1:29]  # Skip the latest date (index 0)
+            date_range = dates_list[:29]
             
             if not date_range:
                 return False, "No historical data available", {}
@@ -411,3 +410,63 @@ class ReadOperation():
         except Exception as e:
             return False,"Error gettingCompanyFullDetails() : "+str(e),None
             
+    def returnDataFromServer(self,range=30)->Tuple[bool,str,dict]:
+        """Return data from the server withing the given range"""
+
+        #01. check database have that amont of data
+        query = "SELECT COUNT(DISTINCT(trade_date)) AS date_count FROM historical_prices;"
+
+        try:
+            success,dMessage,result = self.query_obj.readSQL(query=query)
+
+            if not success and not result:
+                return success,dMessage,None
+
+        except Exception as e:
+            result = 0
+            dMessage = "Error : returnDataFromServer() "+str(e)
+        #fix the result
+        result = int(result[0]['date_count'])
+
+        #check the result is less than range
+        if result > range:
+            #02. return back to data based on the range
+            query = """
+                    SELECT
+                        trade_date,
+                        symbol,
+                        name,
+                        close_price,
+                        volume
+                    FROM
+                        historical_prices
+                    WHERE
+                        trade_date >= (
+                            SELECT trade_date
+                            FROM (
+                                SELECT DISTINCT trade_date
+                                FROM historical_prices
+                                ORDER BY trade_date DESC
+                                LIMIT %s, 1   -- 30th most recent distinct trading date (0-indexed)
+                            ) AS recent_dates
+                        )
+                    ORDER BY
+                        symbol, trade_date;
+                    """
+
+            values = (range-1,)
+
+            try:
+                #getting data from the servers
+                success,dMessage,result = self.query_obj.applyFilterForSQL(
+                    query=query,
+                    values=values
+                    )
+
+                if not success:
+                    return success,dMessage,None,
+
+                return success,dMessage,result
+
+            except Exception as e:
+                dMessage = "Error : returnDataFromServer() "+str(e)

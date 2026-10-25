@@ -3,9 +3,10 @@ import os
 import sys
 from PySide6.QtWidgets import (QScrollArea, QSizePolicy, QWidget, QApplication, QMainWindow, QTableWidgetItem, 
                                QMessageBox, QButtonGroup, QFrame, QVBoxLayout, QHBoxLayout, 
-                               QLabel, QProgressBar, QPushButton, QHeaderView, QTableWidget)
+                               QLabel, QProgressBar, QPushButton, QHeaderView, QTableWidget,
+                               QFileDialog)
 from PySide6.QtUiTools import QUiLoader
-from PySide6.QtCore import QFile, Qt, QMargins, QDateTime
+from PySide6.QtCore import QFile, Qt, QMargins, QDateTime, QThread, Signal, QTimer
 from PySide6.QtGui import QIcon, QPainter, QBrush, QColor
 
 from PySide6.QtCharts import (QChart, QChartView, QBarSeries, QBarSet, QBarCategoryAxis, 
@@ -18,11 +19,49 @@ from src.windows.main_window.ImportDataWindow import ImportDataWindow
 from src.services.main_window.MainData import MainData
 from src.windows.main_window.CustomWidgets import CustomWidgets
 from src.windows.main_window.CustomWidgets.AdvancedAnalysisCardWidget import AdvancedAnalysisCardWidget
-from src.windows.main_window.CustomWidgets.SuggestionCardWidget import SuggestionCardWidget
+from src.services.ManageAI import chat_with_ollama
 
 from src.services.charts.charts import Charts
+from src.services.MarketDataRefresh import MarketDataRefreshThread
+from src.services.DB_Handler.InsertData import InsertData
+from src.databases.schema import migrate_database_schema
 from src.windows.main_window.SectorPeformance import SectorPerformance
 from src.windows.main_window.PortPolioMatrix import PortPolioMatrix
+
+
+class OllamaChatThread(QThread):
+    """Run an Ollama request without blocking the desktop application's UI."""
+
+    reply_received = Signal(str)
+    error_occurred = Signal(str)
+
+    def __init__(self, prompt: str):
+        super().__init__()
+        self.prompt = prompt
+
+    def run(self):
+        try:
+            self.reply_received.emit(chat_with_ollama(self.prompt))
+        except Exception as error:
+            self.error_occurred.emit(f"Ollama request failed: {error}")
+
+
+class CSVUploadThread(QThread):
+    """Clean a selected CSV and insert it without blocking the UI."""
+
+    upload_finished = Signal(bool, str)
+
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            success, message, _ = InsertData().insert_csv_file(self.file_path)
+        except Exception as error:
+            success, message = False, f"CSV upload failed: {error}"
+        self.upload_finished.emit(success, message)
+
 
 # ==========================================
 # 3. MAIN WINDOW APPLICATION
@@ -83,7 +122,10 @@ class MainWindow():
                 
                 # Labels
                 self.trackedStocksLable = getattr(self.main_window, "trackedStocksLable", None)
-                self.actionImport = getattr(self.main_window, "actionImport", None)
+                self.lblBarChart = self.main_window.findChild(QLabel, "lblBarChart")
+                self.lblLineChart = self.main_window.findChild(QLabel, "lblLineChart")
+                self.actionFetching_CSE = getattr(self.main_window, "actionFetching_CSE", None)
+                self.actionUpload_CSV = getattr(self.main_window, "actionUpload_CSV", None)
                 self.actionReload = getattr(self.main_window, "actionReload", None)
 
 
@@ -116,8 +158,10 @@ class MainWindow():
                 self.logMsg.error_message(f"Button Setup Error: {str(e)}")
 
             # Connect menu actions menu items to their respective functions
-            if self.actionImport:
-                self.actionImport.triggered.connect(self.importing_data)
+            if self.actionFetching_CSE:
+                self.actionFetching_CSE.triggered.connect(self.fetching_cse_data)
+            if self.actionUpload_CSV:
+                self.actionUpload_CSV.triggered.connect(self.upload_csv_data)
 
             # Connect reload menu item to reload data
             if self.actionReload:
@@ -126,6 +170,19 @@ class MainWindow():
 
             # --- DATA INITIALIZATION ---
             self.mainData_obj = MainData()
+            schema_success, schema_message = migrate_database_schema(
+                self.mainData_obj.db_read.query_obj.conn,
+                self.mainData_obj.SECTOR_MAPPING_DATA_FILE,
+            )
+            if schema_success:
+                self.logMsg.info_message(message=schema_message)
+            else:
+                self.logMsg.error_message(message=schema_message)
+                QMessageBox.warning(
+                    self.main_window,
+                    "Database schema",
+                    f"{schema_message}\nCharts will use available bundled data where possible.",
+                )
             
             #create class obj for charts
             self.chart_obj = Charts()
@@ -143,6 +200,7 @@ class MainWindow():
 
             # --- SAFE STARTUP SEQUENCE ---
             self.run_startup_tasks()
+            self._setup_market_data_refresh()
 
         except Exception as e:
             error_text = f"An unexpected error occurred during init : {str(e)}"
@@ -154,15 +212,45 @@ class MainWindow():
         """Executes all data loading methods safely"""
         try:
             self.showTop10Gainers()
+            self.loadSuggestionsTable()
             self.loadSectorWiseInvestmentData()
             self.loadTimeSeriesData()
-            self.loadSuggestionsTable()
-            self.loadAdvancedAnalysisCard("COMB.N0000")
+            #self.loadAdvancedAnalysisCard("YORK.N0000")
 
             self.logMsg.info_message("Main window modules loaded successfully.")
 
         except Exception as e:
             self.logMsg.error_message(f"Startup execution error: {str(e)}")
+
+    def _setup_market_data_refresh(self):
+        self.marketDataRefreshTimer = QTimer(self.main_window)
+        self.marketDataRefreshTimer.setInterval(24 * 60 * 60 * 1000)
+        self.marketDataRefreshTimer.timeout.connect(self.refreshBundledMarketData)
+        self.marketDataRefreshTimer.start()
+        self.refreshBundledMarketData()
+
+    def refreshBundledMarketData(self):
+        current_thread = getattr(self, "marketDataRefreshThread", None)
+        if current_thread and current_thread.isRunning():
+            return
+
+        self.marketDataRefreshThread = MarketDataRefreshThread(
+            csv_path=self.mainData_obj.SECTOR_VOLUME_DATA_FILE,
+            parent=self.main_window,
+        )
+        self.marketDataRefreshThread.refresh_finished.connect(self._marketDataRefreshFinished)
+        self.marketDataRefreshThread.refresh_failed.connect(self._marketDataRefreshFailed)
+        self.marketDataRefreshThread.start()
+
+    def _marketDataRefreshFinished(self, message):
+        self.logMsg.info_message(message=message)
+        if "refreshed" in message.lower():
+            self.run_startup_tasks()
+
+    def _marketDataRefreshFailed(self, message):
+        self.logMsg.error_message(message=message)
+        if self.lblLineChart:
+            self.lblLineChart.setText(f"Top 10 Stock Closing Prices · Refresh failed; showing available data")
 
     def setup_menu_styling(self):
         buttons = [self.btnDashboard, self.btnPortfolio, self.btnSector, self.btnSetting, self.btnTradeEngine]
@@ -172,10 +260,45 @@ class MainWindow():
                 btn.setCheckable(True)
                 self.btn_group.addButton(btn)
 
-    def importing_data(self):
-        self.logMsg.info_message(message="User Clicked the Import menu Item")
-        self.importing_data_window = ImportDataWindow()
+    def fetching_cse_data(self):
+        self.logMsg.info_message(message="User selected Fetching CSE")
+        self.importing_data_window = ImportDataWindow(
+            on_import_complete=self.run_startup_tasks
+        )
         self.importing_data_window.show()
+
+    def upload_csv_data(self):
+        """Select, clean, and insert a CSV dataset into historical_prices."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self.main_window,
+            "Upload market data CSV",
+            "",
+            "CSV files (*.csv)",
+        )
+        if not file_path:
+            return
+
+        current_thread = getattr(self, "csvUploadThread", None)
+        if current_thread and current_thread.isRunning():
+            QMessageBox.information(
+                self.main_window,
+                "CSV upload",
+                "A CSV upload is already in progress.",
+            )
+            return
+
+        self.csvUploadThread = CSVUploadThread(file_path, self.main_window)
+        self.csvUploadThread.upload_finished.connect(self._csv_upload_finished)
+        self.csvUploadThread.start()
+
+    def _csv_upload_finished(self, success, message):
+        if success:
+            self.logMsg.info_message(message=message)
+            QMessageBox.information(self.main_window, "CSV upload complete", message)
+            self.run_startup_tasks()
+        else:
+            self.logMsg.error_message(message=message)
+            QMessageBox.warning(self.main_window, "CSV upload failed", message)
 
     # ---------------------------------------------------------
     # UI COMPONENT LOADERS
@@ -208,31 +331,35 @@ class MainWindow():
 
         try:
             file_path = './resources/cash/sector_dataset_cash.json'
-
-            if os.path.exists(file_path):
-                with open(file_path, 'w') as f:
-                    #write the initial structure to the cash file
-                    json.dump({"data":sectorNames},f)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump({"data": sectorNames}, f)
 
         except Exception as e:
             self.logMsg.error_message(message="Error in adding sector names to cash file : "+str(e))
 
     def loadSectorWiseInvestmentData(self):
-        if not self.sectorPerformChartWidget: return
+        if not self.sectorPerformChartWidget:
+            return
 
+        sampleData = []
         try:
-            success,dMessage,dataset = self.mainData_obj.getSectorWiseInvestmentsDetails()
+            success, dMessage, dataset = self.mainData_obj.getSectorWiseInvestmentsDetails()
 
-            if not success:
-                return success,dMessage,None
+            if not success or not isinstance(dataset, dict):
+                if self.lblBarChart:
+                    self.lblBarChart.setText("Sector Trading Volume · Data unavailable")
+                self.logMsg.error_message(message=dMessage or "No sector volume data is available.")
+                return
+
+            if self.lblBarChart:
+                self.lblBarChart.setText(f"Sector Trading Volume · {dMessage}")
             
             # format the dataset while preserving zero values so the chart can render them
-            sampleData = []
-            #list for sector names
             sectorNames = []
 
             for key, value in dataset.items():
-                if value is None:
+                if not isinstance(key, str) or not key.strip() or value is None:
                     continue
 
                 try:
@@ -240,23 +367,23 @@ class MainWindow():
                 except (TypeError, ValueError):
                     continue
 
-
-                #avoid zero values if you want to skip them, but here we keep them for chart rendering
-                if numeric_value > 0:
-                    #add the sector data to the sampleData list for charting
+                if numeric_value >= 0:
                     sampleData.append({
-                        "sector_name": key,
+                        "sector_name": key.strip(),
                         "investment_value": numeric_value
                     })
-
-                    #adding the sector names to the list for cashing
-                    sectorNames.append(key)
+                    sectorNames.append(key.strip())
 
             #add the sector names to the cash file for use in sector performance charting
             self.__addSectorsToCash(sectorNames)
 
         except Exception as e:
             self.logMsg.error_message(message="Error in loading Sector Wise Data set : "+str(e))
+            return
+
+        if not sampleData:
+            self.logMsg.error_message(message="No valid sector volume data is available to chart.")
+            return
         
         chartview = self.chart_obj.showSectorBarChart(sectorData=sampleData)
         if chartview:
@@ -272,18 +399,25 @@ class MainWindow():
                         child.widget().deleteLater()
 
             layout.addWidget(chartview)
+        else:
+            self.logMsg.error_message(message="Could not create the sector volume bar chart.")
 
     def loadTimeSeriesData(self):
-        """Load the time series Data"""
-        if not self.top3RecStTrendChartWidget: return
+        """Load the top-gainer close-price trend chart."""
+        if not self.top3RecStTrendChartWidget:
+            return
 
-        #Here is the place where time series data shows
         success,dMessage, dataset = self.mainData_obj.loadClosedPrices()
 
-        if not success:
-            return success,dMessage,None
+        if not success or not dataset or not dataset[0] or not dataset[1]:
+            if self.lblLineChart:
+                self.lblLineChart.setText("Top Gainer Closing Prices · Data unavailable")
+            self.logMsg.error_message(message=dMessage or "No top-gainer close-price data is available.")
+            return
 
-        #factorize the dataset
+        if self.lblLineChart:
+            self.lblLineChart.setText(f"Top Gainer Closing Prices · {dMessage}")
+
         sampleData,companySymbols = dataset[0],dataset[1]
 
         chartview = self.chart_obj.showTimeSeriesChart(
@@ -293,7 +427,6 @@ class MainWindow():
 
         if chartview:
             layout = self.top3RecStTrendChartWidget.layout()
-            # SAFE LAYOUT CREATION
             if layout is None:
                 layout = QVBoxLayout(self.top3RecStTrendChartWidget)
                 layout.setContentsMargins(0, 0, 0, 0)
@@ -307,14 +440,21 @@ class MainWindow():
                         child.widget().deleteLater()
 
             layout.addWidget(chartview)
+        else:
+            self.logMsg.error_message(message="Could not create the top-gainer close-price chart.")
 
     def loadSuggestionsTable(self):
         if not self.stockPurchaseRecWidget: return
-        suggestions_data = [
-            {"code": "COMB.N0000", "name": "Commercial Bank", "suggestion": "Buy"},
-            {"code": "DIAL.N0000", "name": "Dialog Axiata", "suggestion": "Hold"},
-            {"code": "JKH.N0000", "name": "John Keells Hld", "suggestion": "Sell"}
-        ]
+
+        #getting suggetions from the mainData handler
+        dataset = self.mainData_obj.generate_recommendations()
+
+        if isinstance(dataset, dict):
+            self.logMsg.error_message(message=dataset.get("error", "No recommendations available."))
+            suggestions_data = []
+        else:
+            suggestions_data = dataset
+
 
         table = self.stockPurchaseRecWidget 
         table.setRowCount(0)
@@ -354,13 +494,14 @@ class MainWindow():
     # DYNAMIC CARD SPAWNERS
     # ---------------------------------------------------------
 
+
     def showSuggestionDetails(self, stock_code):
-        if not self.analysisCardContainer: return
-        card = SuggestionCardWidget(
-            stock_name=f"{stock_code} Analysis", current_price=110.50, target_price=135.00,
-            verdict="BUY", confidence=92, rsi="35 (Oversold)", macd="Bullish Crossover",
-            news="Deep Seek Analysis: High positive sentiment."
-        )
+        if not self.analysisCardContainer:
+            return
+
+        reply_label = QLabel(f"Requesting an educational overview for {stock_code} from Ollama...")
+        reply_label.setWordWrap(True)
+        reply_label.setStyleSheet("color: #CCCCCC; padding: 15px;")
 
         layout = self.analysisCardContainer.layout()
         if layout is None:
@@ -371,8 +512,25 @@ class MainWindow():
             while layout.count():
                 child = layout.takeAt(0)
                 if child.widget(): child.widget().deleteLater()
-                
-        layout.addWidget(card)
+
+        layout.addWidget(reply_label)
+
+        prompt = (
+            f"The only information available is the CSE ticker {stock_code}. "
+            "Give a brief educational explanation of what a person should check "
+            "when evaluating this stock. Do not claim access to current market "
+            "data, invent company facts, or present this as financial advice."
+        )
+        self._ollama_threads = getattr(self, "_ollama_threads", [])
+        worker = OllamaChatThread(prompt)
+        self._ollama_threads.append(worker)
+        worker.reply_received.connect(reply_label.setText, Qt.ConnectionType.QueuedConnection)
+        worker.error_occurred.connect(reply_label.setText, Qt.ConnectionType.QueuedConnection)
+        worker.finished.connect(
+            lambda current=worker: self._ollama_threads.remove(current)
+            if current in self._ollama_threads else None
+        )
+        worker.start()
 
     def loadAdvancedAnalysisCard(self, stock_code):
         if not self.advancedAnalysisContainer: return

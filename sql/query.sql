@@ -132,3 +132,25 @@ SELECT
 FROM historical_prices 
 WHERE 
     symbol='LGL.X0000';
+
+/*Getting data back to range*/
+SELECT 
+    trade_date,
+    symbol,
+    name,
+    close_price,
+    volume
+FROM 
+    historical_prices
+WHERE 
+    trade_date >= (
+        SELECT trade_date
+        FROM (
+            SELECT DISTINCT trade_date
+            FROM historical_prices
+            ORDER BY trade_date DESC
+            LIMIT 29, 1   -- 30th most recent distinct trading date (0-indexed)
+        ) AS recent_dates
+    )
+ORDER BY 
+    symbol, trade_date;

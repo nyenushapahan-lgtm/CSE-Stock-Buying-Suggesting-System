@@ -2,24 +2,19 @@ import requests
 import pandas as pd
 import time
 import os
-from datetime import datetime,timedelta
 from src.services.logger import Logging
 from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import QMessageBox
 from src.services.DB_Handler.InsertData import InsertData
 
 class CSEDataDownload(QThread):
     progress_bar = Signal(int)
-    download_finished = Signal(dict)
+    download_finished = Signal(bool, str)
 
     def __init__(self,start_date,end_date):
         super().__init__()
         self.start_date = start_date
         self.end_date = end_date
         self.logMsg = Logging()
-
-        #creating insert objects
-        self.query_obj = InsertData()
 
     def run(self):
         """Download the CSE data as a CSV file"""
@@ -70,12 +65,14 @@ class CSEDataDownload(QThread):
                 else:
                     self.logMsg.error_message(message=f"  -> Failed. Status code: {responce.status_code}")
                     
-            except Exception as e:
-                self.logMsg.error_message(message=f" -> No trading data found for {date_str} (Might be a public holiday.)")
+            except Exception as error:
+                self.logMsg.error_message(
+                    message=f"Failed to fetch CSE data for {date_str}: {error}"
+                )
 
             #Update the progress bar
-            progress_percentage = int(((i + 1)/total_dates)*100)
-            self.progress_bar.emit(progress_percentage)
+            progress_percentage = int(((i + 1) / total_dates) * 100)
+            self.progress_bar.emit(min(progress_percentage, 99))
 
             time.sleep(2)
 
@@ -84,54 +81,31 @@ class CSEDataDownload(QThread):
             master_df = pd.concat(all_dataframes, ignore_index=True)
             
         else:
-            # Emit an empty dictionary to tell the UI the process finished but failed
-            self.download_finished.emit({})
+            self.download_finished.emit(
+                False, "No CSE market data was returned for the selected dates."
+            )
             return
         
-        #formating and download the data set
+        self.logMsg.info_message(
+            f"\nExtraction Complete! Loaded {len(master_df)} total stock records across multiple days."
+        )
 
-        if master_df is not None and not master_df.empty:
-            self.logMsg.info_message(f"\nExtraction Complete! Loaded {len(master_df)} total stock records across multiple days.")
+        try:
+            importer = InsertData()
+            clean_df = importer.clean_market_data(master_df)
+            os.makedirs("./resources/data", exist_ok=True)
+            clean_df.to_csv("./resources/data/data.csv", index=False)
 
-            #Feature selection & cleaninng 
-            columns_to_keep = [
-                'trade_date', 'symbol', 'name', 'open', 'high', 'low', 
-                'closingPrice', 'sharevolume', 'turnover', 'percentageChange'
-            ]
+            success, message, _ = importer.insert_dataframe(clean_df)
+            if not success:
+                self.logMsg.error_message(message=message)
+                self.download_finished.emit(False, message)
+                return
 
-            #Filter out missing columns just in case the API changed 
-            available_columns = [col for col in columns_to_keep if col in master_df.columns]
-            clean_df = master_df[available_columns].copy()
-
-            clean_df.rename(
-                columns={
-                    'closingPrice':'close',
-                    'sharevolume':'volume',
-                    'percentageChange':'pct_change'
-                }, inplace=True
-            )
-
-            self.logMsg.info_message(message="\n Cleaned Historical Sample Data: ")
-            
-            try:
-                os.makedirs("./resources/data", exist_ok=True)
-                #save the large dataset to a CSV file to avoid re-download 
-                clean_df.to_csv("./resources/data/data.csv",index=False)
-
-                #pass the dataset into mysql database
-                success,dMessage,_ = self.query_obj.insert_csv_file(file_path="./resources/data/data.csv")
-
-                if not success:
-                    self.logMsg.error_message(message=dMessage)
-                        
-                #successfully created the csv file
-                self.logMsg.info_message(message="Successfully Created the data set.")
-
-            except Exception as e:
-                self.logMsg.error_message(message="Error : "+str(e))
-
-        else:
-            self.logMsg.error_message(message="Failed to extract historical data.")
-
-
-
+            self.logMsg.info_message(message=message)
+            self.progress_bar.emit(100)
+            self.download_finished.emit(True, message)
+        except (OSError, TypeError, ValueError, KeyError) as error:
+            message = f"Unable to clean or save downloaded CSE data: {error}"
+            self.logMsg.error_message(message=message)
+            self.download_finished.emit(False, message)

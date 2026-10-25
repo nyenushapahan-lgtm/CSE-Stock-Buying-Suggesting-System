@@ -10,15 +10,15 @@ from resources.icons import resources_rc
 from src.services.DataDownloadThread import DataDownloadThread
 from src.services.CSEDataDownload import CSEDataDownload
 from src.services.main_window.MainData import MainData
-import os
 from src.services.DB_Handler.DeleteData import DeleteOperation
 
 class ImportDataWindow():
     """
     This is for data importing handles from this class and manage it. 
     """
-    def __init__(self):
+    def __init__(self, on_import_complete=None):
         self.import_data_window = None
+        self.on_import_complete = on_import_complete
 
         try:
             #make logger instance
@@ -83,6 +83,13 @@ class ImportDataWindow():
 
         if not all((start_date,end_date)):
             return self.logMsg.error_message(message="Start date and End Date Cannot be Empty ! ")
+        if self.startDateWidget.date() > self.endDateWidget.date():
+            QMessageBox.warning(
+                self.import_data_window,
+                "Invalid date range",
+                "The start date must be on or before the end date.",
+            )
+            return
         
         #disable the button 
         self.importDataBtn.setEnabled(False)
@@ -103,31 +110,21 @@ class ImportDataWindow():
         """This updates the UI every time the thread emits a new percentage"""
         self.progressBar.setValue(value)
 
-        if int(value) == 100:
-            QMessageBox.information(self.import_data_window,"Data Download Status","Successfully Download the Data !")
-
-            self.logMsg.info_message(message="Successfully Download the Data !")
-            
+    def on_download_complete(self, success, message):
+        """Report the CSE fetch and database insertion result."""
+        if success:
+            self.progressBar.setValue(100)
+            QMessageBox.information(
+                self.import_data_window, "Import complete", message
+            )
+            self.logMsg.info_message(message=message)
+            if self.on_import_complete:
+                self.on_import_complete()
             self.close()
-
-    def on_download_complete(self, data_dict):
-        """This runs when the thread hits 100%"""
-
-        #create data folder if is does not exists
-        save_folder = 'resources/data'
-        if not os.path.exists(save_folder):
-            os.mkdir(save_folder)
-
-        for ticker,df in data_dict.items():
-            file_path = f"{save_folder}/{ticker}_historical.csv"
-
-            #write data to csv file
-            df.to_csv(file_path,index=False)
-            self.logMsg.info_message(f"Saved {ticker} to {file_path}")
-
-        QMessageBox.information(None, "Success", f"Successfully downloaded data for {len(data_dict)} stocks!")
-
-        #self.close()
+        else:
+            self.importDataBtn.setEnabled(True)
+            QMessageBox.warning(self.import_data_window, "Import failed", message)
+            self.logMsg.error_message(message=message)
 
     def __clearTheDataMonthBack(self):
         """This method clear the data one month before"""
